@@ -21,7 +21,7 @@ CLEANUP_INTERVAL = 3600  # 1小时
 # aiohttp Session 复用超时
 SESSION_TIMEOUT = aiohttp.ClientTimeout(total=120)
 
-@register(astrbot_plugin_seedream_image, "寰宇中的星尘", "火山方舟Seedream图片生成（文生图/图生图）", "3.3.1", "https://github.com/MarcoHuanxing/astrbot_plugin_seedream_image")
+@register("astrbot_plugin_seedream_image", "寰宇中的星尘", "火山方舟Seedream图片生成（文生图/图生图）", "3.3.1", "https://github.com/MarcoHuanxing/astrbot_plugin_seedream_image")
 class SeedreamImagePlugin(Star):
     def __init__(self, context: Context, config: dict):
         super().__init__(context)
