@@ -12,7 +12,7 @@ from typing import Optional, List, Tuple
 from astrbot.api import logger
 from astrbot.api.star import register, Star, Context, StarTools
 from astrbot.api.event import filter, AstrMessageEvent
-from astrbot.api.message_components import Plain, Image, Reply
+from astrbot.api.message_components import Plain, Image, Reply, At
 
 # 插件常量定义
 PLUGIN_NAME = "astrbot_plugin_seedream_image"
@@ -217,23 +217,71 @@ class SeedreamImagePlugin(Star):
             raise Exception(f"图片下载失败: {str(e)}")
 
     def _extract_image_url_list(self, event: AstrMessageEvent) -> List[str]:
-        """提取消息中的图片URL列表"""
+        """
+        优先从引用消息中获取图片，其次获取当前消息中的图片
+        优先级：引用消息的图片 > 当前消息的 Image 组件 > At 组件（用户头像）
+        """
         image_urls = []
         
-        if hasattr(event, 'message_obj') and event.message_obj and event.message_obj.message:
-            for component in event.message_obj.message:
-                if isinstance(component, Image):
-                    img_url = ""
-                    if hasattr(component, 'url') and component.url:
-                        img_url = component.url.strip()
-                    elif hasattr(component, 'file_id') and component.file_id:
-                        file_id = component.file_id.replace("/", "_")
-                        img_url = f"https://gchat.qpic.cn/gchatpic_new/0/0-0-{file_id}/0?tp=webp&wxfrom=5&wx_lazy=1"
-                    
-                    if img_url and img_url not in image_urls:
-                        image_urls.append(img_url)
+        if not hasattr(event, 'message_obj') or not event.message_obj or not event.message_obj.message:
+            return image_urls
+        
+        # 第一优先级：从引用消息中获取图片
+        for component in event.message_obj.message:
+            if isinstance(component, Reply) and component.chain:
+                reply_images = self._extract_images_from_chain(component.chain)
+                image_urls.extend(reply_images)
+                # 如果从引用中获取到图片，直接返回（优先使用引用中的图片）
+                if image_urls:
+                    return image_urls
+        
+        # 第二优先级：从当前消息中获取 Image 组件
+        for component in event.message_obj.message:
+            if isinstance(component, Image):
+                img_url = self._extract_image_url(component)
+                if img_url and img_url not in image_urls:
+                    image_urls.append(img_url)
+        
+        # 如果获取到 Image 组件，直接返回
+        if image_urls:
+            return image_urls
+        
+        # 第三优先级：从 At 组件获取用户头像（图生图的参考图像）
+        for component in event.message_obj.message:
+            if isinstance(component, At):
+                if str(component.qq).isdigit():
+                    avatar_url = f"https://q1.qlogo.cn/g?b=qq&nk={component.qq}&s=640"
+                    if avatar_url not in image_urls:
+                        image_urls.append(avatar_url)
         
         return image_urls
+    
+    def _extract_image_url(self, component: Image) -> str:
+        """从 Image 组件中提取 URL"""
+        if hasattr(component, 'url') and component.url:
+            return component.url.strip()
+        elif hasattr(component, 'file_id') and component.file_id:
+            file_id = component.file_id.replace("/", "_")
+            return f"https://gchat.qpic.cn/gchatpic_new/0/0-0-{file_id}/0?tp=webp&wxfrom=5&wx_lazy=1"
+        return ""
+    
+    def _extract_images_from_chain(self, chain) -> List[str]:
+        """从消息链中提取所有图片 URL"""
+        images = []
+        if not chain:
+            return images
+        
+        for segment in chain:
+            if isinstance(segment, Image):
+                img_url = self._extract_image_url(segment)
+                if img_url and img_url not in images:
+                    images.append(img_url)
+            elif isinstance(segment, Reply) and segment.chain:
+                # 递归处理嵌套引用
+                nested_images = self._extract_images_from_chain(segment.chain)
+                images.extend(nested_images)
+        
+        return images
 
     # =========================================================
     # 核心API调用逻辑（优化异常处理粒度）
@@ -312,13 +360,16 @@ class SeedreamImagePlugin(Star):
     # =========================================================
     # 指令处理（精简输出）
     # =========================================================
-    @filter.command("画图豆包")
+    @filter.command("豆包")
     async def generate_image(self, event: AstrMessageEvent, prompt: str = ""):
         """
-        火山方舟Seedream图片生成
+        火山方舟Seedream图片生成（支持文生图、图生图、引用生图）
+        
         使用方法：
-        1. 文生图：画图豆包 <提示词>
-        2. 图生图：画图豆包 <提示词> + 发送图片
+        1. 文生图：/豆包 <提示词>
+        2. 图生图：/豆包 <提示词> + 发送图片
+        3. 引用生图：回复他人消息 + /豆包 <提示词>（优先使用引用中的图片）
+        4. 头像参考：@某人 + /豆包 <提示词>（当无图片时使用 @用户 的头像作参考）
         """
         # 提取完整提示词
         full_text = ""
@@ -331,7 +382,7 @@ class SeedreamImagePlugin(Star):
             full_text = prompt
         
         # 移除指令关键词
-        real_prompt = re.sub(r"画图豆包", "", full_text).strip()
+        real_prompt = full_text.replace("/", "").replace("豆包", "").strip()
         
         # 提取图片URL列表
         image_urls = self._extract_image_url_list(event)
