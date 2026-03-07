@@ -16,7 +16,7 @@
   "image_size": {
     "description": "生成图片的分辨率。在prompt中用自然语言描述图片宽高比、图片形状或图片用途，最终由模型判断生成图片的大小。",
     "type": "string",
-    "hint": "选择生成图像的分辨率，Seedream 4.0支持1K/2K/4K，Seedream 4.5支持2K、4K，5.0 lite支持2K/3K",
+    "hint": "选择生成图像的分辨率，Seedream4.0支持1K/2K/4K，Seedream4.5支持2K/4K，Seedream5.0lite支持2K/3K",
     "default": "2K",
     "options": [
       "1K",
