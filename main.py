@@ -72,10 +72,10 @@ class SeedreamImagePlugin(Star):
         self.video_ratio = str(config.get("video_ratio", "")).strip()
         
         # 2. 解析功能和定时参数配置
-        self.video_duration = config.get("video_duration", "").strip()
-        self.show_prompt_in_reply = config.get("show_prompt_in_reply", "").strip()
-        self.download_timeout = config.get("download_timeout", "").strip()
-        self.clean_cron = config.get("clean_cron", "").strip()
+        self.video_duration = (config.get("video_duration", "")).strip()
+        self.show_prompt_in_reply = (config.get("show_prompt_in_reply", "")).strip()
+        self.download_timeout = (config.get("download_timeout", "")).strip()
+        self.clean_cron = (config.get("clean_cron", "")).strip()
         
         # 3. 拼接完整API地址
         self.image_api_url = f"{self.api_endpoint.rstrip('/')}/images/generations"
