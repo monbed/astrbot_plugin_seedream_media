@@ -5,7 +5,11 @@ import json
 import uuid
 import asyncio
 import aiohttp
+import shutil
 from typing import Optional, List, Tuple
+
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.cron import CronTrigger
 
 # 核心导入
 from astrbot.api import logger
@@ -15,8 +19,43 @@ from astrbot.api.message_components import Plain, Image, Video, Reply, At
 
 # 插件常量定义
 PLUGIN_NAME = "astrbot_plugin_seedream_media"
-# aiohttp Session 复用超时
-SESSION_TIMEOUT = aiohttp.ClientTimeout(total=120)
+
+class CacheCleaner:
+    def __init__(self, cache_dir, cron_expr: str):
+        self.cache_dir = cache_dir
+        self.cron_expr = cron_expr
+        self.scheduler = AsyncIOScheduler(timezone='Asia/Shanghai')
+        self.scheduler.start()
+        self.register_task()
+
+    def register_task(self):
+        try:
+            self.trigger = CronTrigger.from_crontab(self.cron_expr)
+            self.scheduler.add_job(
+                func=self._clean_plugin_cache,
+                trigger=self.trigger,
+                name="SeedreamCacheCleaner_scheduler",
+                max_instances=1,
+            )
+            logger.info(f"[{PLUGIN_NAME}] 缓存清理定时任务已启动，cron: {self.cron_expr}")
+        except Exception as e:
+            logger.error(f"[{PLUGIN_NAME}] 缓存清理 Cron 格式错误：{e}")
+
+    async def _clean_plugin_cache(self) -> None:
+        """删除并重建缓存目录"""
+        loop = asyncio.get_running_loop()
+        try:
+            if self.cache_dir.exists():
+                await loop.run_in_executor(None, shutil.rmtree, self.cache_dir)
+            self.cache_dir.mkdir(parents=True, exist_ok=True)
+            logger.info(f"[{PLUGIN_NAME}] 缓存目录已定时清理并重建。")
+        except Exception:
+            logger.exception(f"[{PLUGIN_NAME}] 定时清理缓存目录时出错。")
+
+    async def stop(self):
+        self.scheduler.remove_all_jobs()
+        self.scheduler.shutdown(wait=False)
+        logger.info(f"[{PLUGIN_NAME}] 缓存清理定时任务已停止")
 
 class SeedreamImagePlugin(Star):
     def __init__(self, context: Context, config: dict):
@@ -59,7 +98,12 @@ class SeedreamImagePlugin(Star):
         self.processing_users = set()
         self.last_operations = {}
         
-
+        # 5. 缓存、超时与清理器
+        self.download_timeout = int(config.get("download_timeout", 120))
+        self.temp_dir = StarTools.get_data_dir(PLUGIN_NAME) / "cache"
+        self.temp_dir.mkdir(parents=True, exist_ok=True)
+        self.clean_cron = config.get("clean_cron", "0 4 * * *")
+        self.cleaner = CacheCleaner(self.temp_dir, self.clean_cron)
         
         # 6. aiohttp Session 复用（优化连接开销）
         self._session: Optional[aiohttp.ClientSession] = None
@@ -79,25 +123,22 @@ class SeedreamImagePlugin(Star):
                 limit_per_host=5
             )
             self._session = aiohttp.ClientSession(
-                timeout=SESSION_TIMEOUT,
+                timeout=aiohttp.ClientTimeout(total=self.download_timeout),
                 connector=connector
             )
         return self._session
 
     async def terminate(self):
         """插件卸载时清理资源（新增：关闭复用的Session）"""
-        # 清理图片文件
-        save_dir = StarTools.get_data_dir(PLUGIN_NAME) / "images"
+        # 停止清理任务
+        if hasattr(self, 'cleaner'):
+            await self.cleaner.stop()
+
+        # 清理缓存文件
+        save_dir = StarTools.get_data_dir(PLUGIN_NAME) / "cache"
         if save_dir.exists():
-            for filename in os.listdir(save_dir):
-                file_path = save_dir / filename
-                if file_path.is_file():
-                    try:
-                        os.remove(file_path)
-                    except Exception:
-                        pass
             try:
-                os.rmdir(save_dir)
+                shutil.rmtree(save_dir)
             except Exception:
                 pass
         
@@ -147,7 +188,7 @@ class SeedreamImagePlugin(Star):
                 image_data = await resp.read()
         
             # 保存图片
-            save_dir = StarTools.get_data_dir(PLUGIN_NAME) / "images"
+            save_dir = StarTools.get_data_dir(PLUGIN_NAME) / "cache"
             save_dir.mkdir(parents=True, exist_ok=True)
             
             file_name = f"seedream_{int(time.time())}_{uuid.uuid4().hex[:8]}.jpg"
@@ -163,42 +204,30 @@ class SeedreamImagePlugin(Star):
 
     def _extract_image_url_list(self, event: AstrMessageEvent) -> List[str]:
         """
-        优先从引用消息中获取图片，其次获取当前消息中的图片
-        优先级：引用消息的图片 > 当前消息的 Image 组件 > At 组件（用户头像）
+        从消息链中提取所有图片 URL（包含引用消息图片、当前消息图片、At 组件头像）
         """
         image_urls = []
         
         if not hasattr(event, 'message_obj') or not event.message_obj or not event.message_obj.message:
             return image_urls
         
-        # 第一优先级：从引用消息中获取图片
-        for component in event.message_obj.message:
-            if isinstance(component, Reply) and component.chain:
-                reply_images = self._extract_images_from_chain(component.chain)
-                image_urls.extend(reply_images)
-                # 如果从引用中获取到图片，直接返回（优先使用引用中的图片）
-                if image_urls:
-                    return image_urls
-        
-        # 第二优先级：从当前消息中获取 Image 组件
-        for component in event.message_obj.message:
-            if isinstance(component, Image):
-                img_url = self._extract_image_url(component)
+        def _extract_from_seg(seg):
+            if isinstance(seg, Image):
+                img_url = self._extract_image_url(seg)
                 if img_url and img_url not in image_urls:
                     image_urls.append(img_url)
-        
-        # 如果获取到 Image 组件，直接返回
-        if image_urls:
-            return image_urls
-        
-        # 第三优先级：从 At 组件获取用户头像（图生图的参考图像）
-        for component in event.message_obj.message:
-            if isinstance(component, At):
-                if str(component.qq).isdigit():
-                    avatar_url = f"https://q1.qlogo.cn/g?b=qq&nk={component.qq}&s=640"
+            elif isinstance(seg, Reply) and seg.chain:
+                for sub_seg in seg.chain:
+                    _extract_from_seg(sub_seg)
+            elif isinstance(seg, At):
+                if str(seg.qq).isdigit():
+                    avatar_url = f"https://q1.qlogo.cn/g?b=qq&nk={seg.qq}&s=640"
                     if avatar_url not in image_urls:
                         image_urls.append(avatar_url)
-        
+                        
+        for seg in event.message_obj.message:
+            _extract_from_seg(seg)
+            
         return image_urls
     
     def _extract_image_url(self, component: Image) -> str:
@@ -209,24 +238,6 @@ class SeedreamImagePlugin(Star):
             file_id = component.file_id.replace("/", "_")
             return f"https://gchat.qpic.cn/gchatpic_new/0/0-0-{file_id}/0?tp=webp&wxfrom=5&wx_lazy=1"
         return ""
-    
-    def _extract_images_from_chain(self, chain) -> List[str]:
-        """从消息链中提取所有图片 URL"""
-        images = []
-        if not chain:
-            return images
-        
-        for segment in chain:
-            if isinstance(segment, Image):
-                img_url = self._extract_image_url(segment)
-                if img_url and img_url not in images:
-                    images.append(img_url)
-            elif isinstance(segment, Reply) and segment.chain:
-                # 递归处理嵌套引用
-                nested_images = self._extract_images_from_chain(segment.chain)
-                images.extend(nested_images)
-        
-        return images
 
     def _extract_prompt(self, event: AstrMessageEvent, command: str, fallback: str = "") -> str:
         """从消息中提取提示词并移除指令关键词"""
@@ -242,10 +253,10 @@ class SeedreamImagePlugin(Star):
     async def _download_video(self, url: str) -> str:
         """下载视频到本地临时文件"""
         logger.info(f"[{PLUGIN_NAME}] 正在下载视频: {url}")
-        temp_dir = os.path.join(os.path.dirname(__file__), "temp_videos")
-        os.makedirs(temp_dir, exist_ok=True)
+        temp_dir = StarTools.get_data_dir(PLUGIN_NAME) / "cache"
+        temp_dir.mkdir(parents=True, exist_ok=True)
         filename = f"video_{str(uuid.uuid4().hex)[:8]}.mp4"
-        local_path = os.path.join(temp_dir, filename)
+        local_path = str(temp_dir / filename)
         
         async with self.session.get(url) as resp:
             if resp.status != 200:
@@ -482,7 +493,8 @@ class SeedreamImagePlugin(Star):
             if real_prompt:
                 content_list.append({"type": "text", "text": real_prompt})
             if image_urls:
-                content_list.append({"type": "image_url", "image_url": {"url": image_urls[0]}})
+                for img_url in image_urls:
+                    content_list.append({"type": "image_url", "image_url": {"url": img_url}})
             
             payload = {
                 "model": self.video_model_version,

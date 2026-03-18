@@ -2,5 +2,5 @@ name: astrbot_plugin_seedream_media
 display_name: 火山豆包
 author: monbed
 description: 火山方舟 Seedream 图片生成 + Seedance 视频生成，支持文生图/图生图/文生视频/图生视频。
-version: 4.0.0
+version: 4.1.0
 repo: https://github.com/monbed/astrbot_plugin_seedream_media
