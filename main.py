@@ -114,6 +114,14 @@ class SeedreamImagePlugin(Star):
         logger.info(f"[{PLUGIN_NAME}] 初始化完成 | 图片模型：{self.model_version} | 视频模型：{self.video_model_version or '未配置'} | 生成尺寸：{self.valid_size} | 显示提示词：{self.show_prompt_in_reply}")
 
     @property
+    def api_headers(self) -> dict:
+        """全局共享 API 请求头"""
+        return {
+            'Authorization': f'Bearer {self.api_key}',
+            'Content-Type': 'application/json'
+        }
+
+    @property
     def session(self) -> aiohttp.ClientSession:
         """复用aiohttp ClientSession，减少TCP连接开销"""
         if self._session is None or self._session.closed:
@@ -171,6 +179,11 @@ class SeedreamImagePlugin(Star):
     # =========================================================
     # 通用工具方法
     # =========================================================
+    def _generate_cache_path(self, ext: str = ".jpg") -> str:
+        """统一生成随机的本地缓存绝对路径"""
+        filename = f"media_{int(time.time())}_{uuid.uuid4().hex[:8]}{ext}"
+        return str(self.temp_dir / filename)
+
     async def _download_generated_image(self, url: str) -> str:
         """下载API生成的图片（复用Session）"""
         logger.info(f"[{PLUGIN_NAME}] 正在下载图片: {url}")
@@ -187,8 +200,7 @@ class SeedreamImagePlugin(Star):
                 image_data = await resp.read()
         
             # 保存图片
-            file_name = f"seedream_{int(time.time())}_{uuid.uuid4().hex[:8]}.jpg"
-            save_path = self.temp_dir / file_name
+            save_path = self._generate_cache_path(".jpg")
             
             with open(save_path, "wb") as f:
                 f.write(image_data)
@@ -246,8 +258,11 @@ class SeedreamImagePlugin(Star):
             full_text = fallback
         return re.sub(rf'^.*?{re.escape(command)}', '', full_text).strip()
 
-    def _check_rate_limit(self, user_id: str) -> Optional[str]:
-        """统一检查用户请求防抖和并发，返回不通过时的错误信息，通过则返回 None"""
+    def _check_preconditions(self, user_id: str) -> Optional[str]:
+        """统一检查基础配置、请求防抖和并发任务，返回错误信息，通过则返回 None"""
+        if not self.api_key:
+            return "未配置 VOLC_API_KEY，请在插件配置中填写火山方舟 API KEY"
+            
         current_time = time.time()
         if user_id in self.last_operations:
             if current_time - self.last_operations[user_id] < self.rate_limit_seconds:
@@ -262,8 +277,7 @@ class SeedreamImagePlugin(Star):
     async def _download_video(self, url: str) -> str:
         """下载视频到本地临时文件"""
         logger.info(f"[{PLUGIN_NAME}] 正在下载视频: {url}")
-        filename = f"video_{str(uuid.uuid4().hex)[:8]}.mp4"
-        local_path = str(self.temp_dir / filename)
+        local_path = self._generate_cache_path(".mp4")
         
         async with self.session.get(url) as resp:
             if resp.status != 200:
@@ -296,9 +310,6 @@ class SeedreamImagePlugin(Star):
 
     async def _call_seedream_api(self, prompt: str, image_urls: List[str] = None):
         """调用火山方舟Seedream API（优化：复用Session，精简异常处理）"""
-        if not self.api_key:
-            raise Exception("VOLC_API_KEY未配置")
-        
         # 构建基础请求体
         payload = {
             "model": self.model_version,
@@ -311,17 +322,11 @@ class SeedreamImagePlugin(Star):
         if image_urls and len(image_urls) > 0:
             payload["image"] = image_urls
         
-        # 请求头
-        headers = {
-            'Authorization': f'Bearer {self.api_key}',
-            'Content-Type': 'application/json'
-        }
-        
         try:
             # 复用全局Session
             async with self.session.post(
                 self.full_api_url,
-                headers=headers,
+                headers=self.api_headers,
                 json=payload
             ) as resp:
                 response_text = await resp.text()
@@ -385,10 +390,10 @@ class SeedreamImagePlugin(Star):
         
         user_id = event.get_sender_id()
         
-        # 统一防抖与并发检查
-        limit_err = self._check_rate_limit(user_id)
-        if limit_err:
-            yield event.plain_result(limit_err)
+        # 统一前置拦截检查
+        err_msg = self._check_preconditions(user_id)
+        if err_msg:
+            yield event.plain_result(err_msg)
             return
         
         # 无提示词且无图片
@@ -446,15 +451,18 @@ class SeedreamImagePlugin(Star):
         """
         user_id = event.get_sender_id()
         
-        # 校验视频模型是否配置
-        if not self.video_model_version:
+        if not getattr(self, "video_model_version", None):
             yield event.plain_result("视频模型未配置，请在插件配置中填写 video_model_version")
             return
+            
+        user_id = event.get_sender_id()
         
-        if not self.api_key:
-            yield event.plain_result("VOLC_API_KEY 未配置")
+        # 统一前置拦截检查
+        err_msg = self._check_preconditions(user_id)
+        if err_msg:
+            yield event.plain_result(err_msg)
             return
-        
+            
         real_prompt = self._extract_prompt(event, "豆包视频", "")
         
         # 复用图片提取方法
@@ -464,21 +472,10 @@ class SeedreamImagePlugin(Star):
             yield event.plain_result("请提供提示词或图片")
             return
         
-        # 统一防抖与并发检查
-        limit_err = self._check_rate_limit(user_id)
-        if limit_err:
-            yield event.plain_result(limit_err)
-            return
-        
         self.processing_users.add(user_id)
         yield event.plain_result("🎬 视频任务已提交！\n⏳ 预计需要 3~5 分钟，完成后会自动发送，请耐心等待。")
         
         try:
-            headers = {
-                'Authorization': f'Bearer {self.api_key}',
-                'Content-Type': 'application/json'
-            }
-            
             # 构建 content 列表
             content_list = []
             if real_prompt:
@@ -497,7 +494,7 @@ class SeedreamImagePlugin(Star):
             }
             
             # 提交视频生成任务
-            async with self.session.post(self.video_tasks_url, headers=headers, json=payload) as resp:
+            async with self.session.post(self.video_tasks_url, headers=self.api_headers, json=payload) as resp:
                 res_data = await resp.json()
                 if resp.status != 200:
                     raise Exception(res_data.get("error", {}).get("message", f"HTTP {resp.status}"))
@@ -516,7 +513,7 @@ class SeedreamImagePlugin(Star):
                 await asyncio.sleep(10)
                 
                 poll_url = f"{self.video_tasks_url}/{task_id}"
-                async with self.session.get(poll_url, headers=headers) as poll_resp:
+                async with self.session.get(poll_url, headers=self.api_headers) as poll_resp:
                     poll_data = await poll_resp.json()
                     status = poll_data.get("status", "").lower()
                     
@@ -541,8 +538,7 @@ class SeedreamImagePlugin(Star):
         
         except Exception as e:
             logger.error(f"[{PLUGIN_NAME}] 视频生成失败（用户{user_id}）: {str(e)}")
-            error_res = event.make_result().message(f"视频生成失败：{str(e)}")
-            await event.send(error_res)
+            yield event.plain_result(f"视频生成失败：{str(e)}")
         
         finally:
             self.processing_users.discard(user_id)
