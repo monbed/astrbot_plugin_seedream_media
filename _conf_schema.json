@@ -84,7 +84,7 @@
   },
   "download_timeout": {
     "description": "网络请求超时时间(秒)",
-    "type": "number",
+    "type": "int",
     "hint": "生成媒体及下载的全局超时时间，默认 120 秒",
     "default": 120
   }
