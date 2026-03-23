@@ -69,6 +69,12 @@
     "hint": "填 2~12 的整数。若填 -1，则由模型在[4,12]秒内自主决定。",
     "default": "-1"
   },
+  "video_multi_image": {
+    "description": "视频多图传入支持",
+    "type": "bool",
+    "hint": "确认视频模型支持多图传入再开启",
+    "default": false
+  },
   "show_prompt_in_reply": {
     "description": "发送图片时是否显示提示词",
     "type": "bool",
