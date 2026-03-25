@@ -119,6 +119,14 @@ class SeedreamImagePlugin(Star):
         if not self.api_key:
             logger.error(f"[{PLUGIN_NAME}] 异常拦截 ｜ 未配置 VOLC_API_KEY，请优先填写火山方舟 API 密钥")
         logger.info(f"[{PLUGIN_NAME}] 初始化完成 ｜ 图片模型：{self.model_version or '未配置'} ｜ 视频模型：{self.video_model_version or '未配置'} ｜ 显示提示词：{self.show_prompt_in_reply}")
+        
+        # 8. 路由注册与前缀拦截配置
+        self.commands = {
+            "豆包画图": self.generate_image,
+            "豆包视频": self.generate_video
+        }
+        
+        self.need_prefix = self.config.get("need_prefix", True)
 
     @property
     def api_headers(self) -> dict:
@@ -190,28 +198,15 @@ class SeedreamImagePlugin(Star):
         return None
 
     def _extract_prompt(self, event: AstrMessageEvent, command: str) -> str:
-        """参考 bananic_ninjutsu 修改：从消息中提取纯净的提示词，过滤 @ 和平台特有组件标记"""
-        # 1. 模拟 ninjutsu 的 PlatformAdapter.message_str 行为
-        # 仅抽取 Plain 文本，彻底抛弃可能被适配器转成字符串的 [图片] 和 [CQ:image...]
-        raw_text_parts = []
-        if hasattr(event, 'message_obj') and event.message_obj and getattr(event.message_obj, 'message', None):
-            for component in event.message_obj.message:
-                if isinstance(component, Plain) and component.text:
-                    raw_text_parts.append(str(component.text))
-                    
-        raw_text = "".join(raw_text_parts).strip()
-        # 兜底获取：如果提取不到任何有效文本，才退而求其次用框架的字符串（其实罕见）
-        if not raw_text:
-            raw_text = getattr(event, 'message_str', '').strip()
+        """从消息中提取纯净的提示词"""
+        text = event.message_str.strip()
         
-        # 2. 剥离可能存在的命令前缀、指令名本身及语法残留（冒号、逗号等）
-        pattern = rf'^.*?{re.escape(command)}[:：,，]?\s*'
-        content = re.sub(pattern, '', raw_text, flags=re.DOTALL).strip()
+        if text.startswith(command):
+            text = text[len(command):].strip()
             
-        # 3. 参考 ninjutsu 剔除 @ 用户名称和 CQ码（[CQ:at...] 等）
         text_parts = []
-        for token in content.split():
-            if not token.startswith("@") and not token.startswith("[CQ:at"):
+        for token in text.split():
+            if not token.startswith("@") and not token.startswith("[CQ:"):
                 text_parts.append(token)
                 
         return " ".join(text_parts).strip()
@@ -478,10 +473,26 @@ class SeedreamImagePlugin(Star):
                     
         raise SeedreamPluginError("任务等待超时 (10分钟)，请稍后重试")
 
+    @filter.event_message_type(filter.EventMessageType.ALL, priority=10)
+    async def global_media_interceptor(self, event: AstrMessageEvent):
+        """
+        基于框架底层鉴权的全局拦截与指令分发
+        """
+        if getattr(self, "need_prefix", True) and not event.is_at_or_wake_command:
+            return
+            
+        text = event.message_str.strip()
+        
+        for cmd, func in self.commands.items():
+            if text.startswith(cmd):
+                event.stop_event()
+                async for res in func(event):
+                    yield res
+                break
+
     # =========================================================
     # 指令处理（精简输出）
     # =========================================================
-    @filter.command("豆包画图")
     async def generate_image(self, event: AstrMessageEvent):
         """
         [指令] 火山方舟 Seedream 图片生成
@@ -553,7 +564,6 @@ class SeedreamImagePlugin(Star):
     # =========================================================
     # 视频生成指令
     # =========================================================
-    @filter.command("豆包视频")
     async def generate_video(self, event: AstrMessageEvent):
         """
         [指令] 火山方舟 Seedance 视频生成

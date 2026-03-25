@@ -1,4 +1,10 @@
 {
+  "need_prefix": {
+    "description": "是否必须使用斜杠等前缀触发",
+    "type": "bool",
+    "hint": "开启后遵循全局的前缀/唤醒词设置；关闭后，直接发送“豆包画图”亦可触发。",
+    "default": true
+  },
   "VOLC_API_KEY": {
     "description": "火山方舟账号的API KEY",
     "type": "string",
