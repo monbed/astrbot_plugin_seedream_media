@@ -198,18 +198,31 @@ class SeedreamImagePlugin(Star):
         return None
 
     def _extract_prompt(self, event: AstrMessageEvent, command: str) -> str:
-        """从消息中提取纯净的提示词"""
-        text = event.message_str.strip()
+        """从消息中提取纯净的提示词（参考 bananic_ninjutsu 逻辑）"""
+        full_text = ""
         
-        if text.startswith(command):
-            text = text[len(command):].strip()
+        # 1. 优先从消息组件链中提取纯文本，自动过滤 [图片]、@用户 等富文本组件
+        if hasattr(event, 'message_obj') and event.message_obj and event.message_obj.message:
+            for component in event.message_obj.message:
+                if isinstance(component, Plain):
+                    full_text += str(component.text) if component.text else ""
+            full_text = full_text.strip()
             
-        text_parts = []
-        for token in text.split():
-            if not token.startswith("@") and not token.startswith("[CQ:"):
-                text_parts.append(token)
-                
-        return " ".join(text_parts).strip()
+        # 2. 兜底方案：如果提取不到有效文本，回退到原始 string 过滤机制（兼容底层字符串包含 CQ 码的情况）
+        if not full_text:
+            raw_text = event.message_str.strip()
+            text_parts = []
+            for token in raw_text.split():
+                if not token.startswith("@") and not token.startswith("[CQ:"):
+                    text_parts.append(token)
+            full_text = " ".join(text_parts).strip()
+            
+        # 3. 剥离指令前缀（例如“豆包画图”）
+        if full_text.startswith(command):
+            full_text = full_text[len(command):].strip()
+            
+        # 为了应对一些用户习惯在指令后加标点，顺手做下清理
+        return re.sub(r'^[:：,，\s]+', '', full_text).strip()
 
     def _extract_image_url_list(self, event: AstrMessageEvent) -> List[str]:
         """
