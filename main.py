@@ -191,22 +191,24 @@ class SeedreamImagePlugin(Star):
 
     def _extract_prompt(self, event: AstrMessageEvent, command: str) -> str:
         """参考 bananic_ninjutsu 修改：从消息中提取纯净的提示词，过滤 @ 和平台特有组件标记"""
-        # 优先使用 AstrBot 内置的 message_str 提取完整纯文本
-        raw_text = getattr(event, 'message_str', '').strip()
+        # 1. 模拟 ninjutsu 的 PlatformAdapter.message_str 行为
+        # 仅抽取 Plain 文本，彻底抛弃可能被适配器转成字符串的 [图片] 和 [CQ:image...]
+        raw_text_parts = []
+        if hasattr(event, 'message_obj') and event.message_obj and getattr(event.message_obj, 'message', None):
+            for component in event.message_obj.message:
+                if isinstance(component, Plain) and component.text:
+                    raw_text_parts.append(str(component.text))
+                    
+        raw_text = "".join(raw_text_parts).strip()
+        # 兜底获取：如果提取不到任何有效文本，才退而求其次用框架的字符串（其实罕见）
+        if not raw_text:
+            raw_text = getattr(event, 'message_str', '').strip()
         
-        # 剥离可能存在的命令前缀、指令名本身及语法残留（冒号、逗号等）
+        # 2. 剥离可能存在的命令前缀、指令名本身及语法残留（冒号、逗号等）
         pattern = rf'^.*?{re.escape(command)}[:：,，]?\s*'
         content = re.sub(pattern, '', raw_text, flags=re.DOTALL).strip()
-        
-        # 备用方案：若适配器未正确处理 message_str，则遍历 Plain 组件
-        if not content and hasattr(event, 'message_obj') and event.message_obj and getattr(event.message_obj, 'message', None):
-            full_text = ""
-            for component in event.message_obj.message:
-                if isinstance(component, Plain):
-                    full_text += component.text
-            content = re.sub(pattern, '', full_text, flags=re.DOTALL).strip()
             
-        # 参考 ninjutsu 剔除 @ 用户名称和 CQ码（[CQ:at...] 等）
+        # 3. 参考 ninjutsu 剔除 @ 用户名称和 CQ码（[CQ:at...] 等）
         text_parts = []
         for token in content.split():
             if not token.startswith("@") and not token.startswith("[CQ:at"):
